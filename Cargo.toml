@@ -1,0 +1,15 @@
+[package]
+name = "plem"
+version = "0.1.0"
+authors = ["Bernhard Schuster <bernhard@ahoi.io>"]
+edition = "2018"
+
+[dependencies]
+plotters = { version = "0.2", features = ["svg"] }
+csv = "1"
+serde = "1"
+failure = "0.1"
+common_failures = "0.1"
+docopt = "1"
+log = "0.4"
+pretty_env_logger = "0.4"

@@ -13,6 +13,10 @@ use log::{warn,trace,debug,info};
 use pretty_env_logger;
 use std::convert::{Into,TryInto};
 
+mod header;
+
+use header::*;
+
 #[derive(Debug, Deserialize)]
 struct Record {
     idx: u32,
@@ -27,7 +31,7 @@ impl Record {
 
 
 const USAGE: &'static str = "
-splosiv
+plem
 
 Usage:
   plem [--title=<title>] [--label=<label>]  <file>
@@ -82,6 +86,7 @@ fn plot(dest: &std::path::Path, label: &str, title: &str, data : &[(f64,f64)], r
 
     Ok(())
 }
+
 
 
 fn run() -> Result<()> {

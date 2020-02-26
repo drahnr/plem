@@ -1,5 +1,6 @@
 use log::{error, info, trace, warn};
 
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 use lazy_static::*;
@@ -15,10 +16,27 @@ pub(crate) struct HeaderInfo {
 }
 
 pub type ColumnIndex = usize;
-pub type ColumnName = String;
 
-pub(crate) struct HeaderColumns {
-    pub columns: HashMap<ColumnIndex, ColumnName>,
+pub type ColumnName<'c> = &'c str;
+
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
+pub(crate) struct HeaderColumns<'c> {
+    pub columns: IndexMap<ColumnIndex, ColumnName<'c>>,
+}
+
+impl<'x, 'c> From<&'x [ColumnName<'c>]> for HeaderColumns<'c> {
+    fn from(slice: &'x [ColumnName<'c>]) -> Self {
+        let n = slice.len();
+        Self {
+            columns: slice.into_iter().enumerate().fold(
+                IndexMap::<_, _>::with_capacity(n),
+                |mut acc, (k, v)| {
+                    let _ = acc.insert(k, v);
+                    acc
+                },
+            ),
+        }
+    }
 }
 
 use nom::branch::alt;
@@ -97,11 +115,9 @@ fn string_val<'i>(input: &'i str) -> IResult<&'i str, Value> {
 
 fn numeric_val<'i>(input: &'i str) -> IResult<&'i str, Value> {
     match tuple((space0, take_till(|x: char| !is_digit(x as u8)), space0))(dbg!(input)) {
-        Ok((remaining, (d0, digits, d1))) => {
-            u64::from_str_radix(dbg!(digits), 10)
-                .map(|n| (remaining, Value::Numeric(n)))
-                .map_err(|_e| nom::Err::Error((digits, nom::error::ErrorKind::Digit)))
-        }
+        Ok((remaining, (d0, digits, d1))) => u64::from_str_radix(dbg!(digits), 10)
+            .map(|n| (remaining, Value::Numeric(n)))
+            .map_err(|_e| nom::Err::Error((digits, nom::error::ErrorKind::Digit))),
         Err(e) => Err(e),
     }
 }
@@ -116,24 +132,22 @@ fn take_header_info_kv<'i>(input: &'i str) -> IResult<&'i str, (&'i str, Value)>
         space0,
         alt((numeric_val, string_val)),
         space0,
-        opt(tuple((char(','),space0)))
+        opt(tuple((char(','), space0))),
     ))(dbg!(input))
     {
-        Ok((remaining_input, (k, _, _, v, _, _))) => {
-            Ok((remaining_input, (k, v)))
-        },
+        Ok((remaining_input, (k, _, _, v, _, _))) => Ok((remaining_input, (k, v))),
         Err(e) => Err(dbg!(e)),
     }
 }
 
-fn parse_header_info<'i>(input: &'i str) -> IResult<&'i str, HeaderInfo> {
-    let (remainder, v_of_kv): (&'i str, Vec<_>) =
-        all_consuming(preceded(
-            tuple((char('\"'), space0)),
-            terminated(
-                many1(take_header_info_kv),
-                tuple((space0, char('\"'),space0)))
-        ))(input)?;
+pub(crate) fn parse_header_info<'i>(input: &'i str) -> IResult<&'i str, HeaderInfo> {
+    let (remainder, v_of_kv): (&'i str, Vec<_>) = all_consuming(preceded(
+        tuple((char('\"'), space0)),
+        terminated(
+            many1(take_header_info_kv),
+            tuple((space0, char('\"'), space0)),
+        ),
+    ))(input)?;
 
     let h = v_of_kv
         .into_iter()
@@ -162,8 +176,25 @@ fn parse_header_info<'i>(input: &'i str) -> IResult<&'i str, HeaderInfo> {
     Ok((remainder, h))
 }
 
-fn parser_header_column(x: &str) -> IResult<&str, HeaderColumns> {
-    unimplemented!("nope, not yet")
+pub(crate) fn parse_header_columns<'i, 'c>(input: &'i str) -> IResult<&'i str, HeaderColumns<'c>>
+where
+    'i: 'c,
+{
+    all_consuming(preceded(
+        tuple((char('\"'), space0)),
+        terminated(
+            map(
+                nom::multi::separated_list(
+                    nom::character::complete::char(','),
+                    map(nom::bytes::complete::is_not(", \t\""), |val| {
+                        dbg!(val) as ColumnName<'c>
+                    }),
+                ),
+                |v| HeaderColumns::<'c>::from(dbg!(&v[..])),
+            ),
+            tuple((space0, char('\"'), space0)),
+        ),
+    ))(input)
 }
 
 #[cfg(test)]
@@ -180,18 +211,18 @@ mod test {
         assert_eq!(res.1, r#"red"#);
     }
 
+    const RAW_HEADER: [&'static str; 2] = [
+        r#""Pallet: "pallet-utility", Extrinsic: "as_sub", Steps: 30, Repeat: 11""#,
+        r#""A,I,time""#,
+    ];
+
     #[test]
-    fn simple<'i, 'j>()
+    fn info<'i, 'j>()
     where
         'i: 'static,
         'i: 'j,
     {
-        let raw_header = vec![
-            r#""Pallet: "pallet-utility", Extrinsic: "as_sub", Steps: 30, Repeat: 11""#,
-            r#""A,I,time""#,
-        ];
-
-        let res = parse_header_info(raw_header[0]).unwrap();
+        let res = parse_header_info(RAW_HEADER[0]).unwrap();
         assert_eq!(
             res.1,
             HeaderInfo {
@@ -201,5 +232,16 @@ mod test {
                 repeat: 11,
             }
         );
+    }
+    #[test]
+    fn columns<'i, 'j>()
+    where
+        'i: 'static,
+        'i: 'j,
+    {
+        let raw_header = vec![r#""A,I,time""#];
+
+        let res = parse_header_columns(RAW_HEADER[1]).unwrap();
+        assert_eq!(res.1, HeaderColumns::from(&["A", "I", "time"][..]));
     }
 }

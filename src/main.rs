@@ -1,17 +1,16 @@
 use std::io;
 
-use failure::bail;
 use common_failures::prelude::*;
 use common_failures::quick_main;
+use failure::{bail, format_err};
 
 use docopt::Docopt;
 use serde::Deserialize;
 
-
 use log;
-use log::{warn,trace,debug,info};
+use log::{debug, info, trace, warn};
 use pretty_env_logger;
-use std::convert::{Into,TryInto};
+use std::convert::{Into, TryInto};
 
 mod header;
 
@@ -28,7 +27,6 @@ impl Record {
         (self.idx.into(), self.time_ms.into())
     }
 }
-
 
 const USAGE: &'static str = "
 plem
@@ -54,8 +52,13 @@ struct Args {
 
 use plotters::prelude::*;
 
-fn plot(dest: &std::path::Path, label: &str, title: &str, data : &[(f64,f64)], ranged: (std::ops::Range<f32>,std::ops::Range<f32>)) -> Result<()> {
-
+fn plot(
+    dest: &std::path::Path,
+    label: &str,
+    title: &str,
+    data: &[(f64, f64)],
+    ranged: (std::ops::Range<f32>, std::ops::Range<f32>),
+) -> Result<()> {
     let root = BitMapBackend::new(dest.to_str().unwrap(), (1024, 768)).into_drawing_area();
     root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
@@ -70,10 +73,9 @@ fn plot(dest: &std::path::Path, label: &str, title: &str, data : &[(f64,f64)], r
 
     chart
         .draw_series(
-            data.iter().map(|(x,y)| { (*x as f32, *y as f32) }).map(|point| {
-                Cross::new(point, 4, Into::<ShapeStyle>::into(&RED).filled())
-            }
-            )
+            data.iter()
+                .map(|(x, y)| (*x as f32, *y as f32))
+                .map(|point| Cross::new(point, 4, Into::<ShapeStyle>::into(&RED).filled())),
         )?
         .label(label)
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
@@ -87,25 +89,25 @@ fn plot(dest: &std::path::Path, label: &str, title: &str, data : &[(f64,f64)], r
     Ok(())
 }
 
-
-
 fn run() -> Result<()> {
-
     let args: Args = Docopt::new(USAGE)
-    .and_then(|d| d.deserialize())
-    .unwrap_or_else(|e| e.exit());
+        .and_then(|d| d.deserialize())
+        .unwrap_or_else(|e| e.exit());
 
-    pretty_env_logger::formatted_builder().default_format().filter_level(log::LevelFilter::Warn).init();
+    pretty_env_logger::formatted_builder()
+        .default_format()
+        .filter_level(log::LevelFilter::Warn)
+        .init();
 
     if args.flag_version {
         println!("{} - {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        return Ok(())
+        return Ok(());
     }
 
     let label = args.flag_label;
     let title = args.flag_title;
 
-    let file : std::path::PathBuf = args.arg_file.try_into()?;
+    let file: std::path::PathBuf = args.arg_file.try_into()?;
 
     let mut data = Vec::with_capacity(128);
     let buffered = std::io::BufReader::with_capacity(4096, io::stdin());
@@ -120,24 +122,46 @@ fn run() -> Result<()> {
     let mut y_min = u32::max_value();
     let mut x_min = u32::max_value();
 
-    for result in rdr.deserialize() {
-        result.map(|record : Record| {
-            if record.idx > x_max {
-                x_max = record.idx;
-            }
-            if record.time_ms > y_max {
-                y_max = record.time_ms;
-            }
-            if record.idx < x_min {
-                x_min = record.idx;
-            }
-            if record.time_ms < y_min {
-                y_min = record.time_ms;
-            }
+    let mut first_valid_record = false;
+    for rec in rdr.records() {
+        let rec = rec.map_err(|_e| format_err!("Failed to parse csv line"))?;
 
-            data.push(record.as_tuple());
-            Ok::<(),failure::Error>(())
-        }).unwrap_or_else(|e| { warn!("Failed to convert {:?}", e); Ok(()) } )?;
+        rec.deserialize::<Record>(None)
+            .map_err(|_e| format_err!("Failed to parse record"))
+            .and_then(|record: Record| {
+                first_valid_record = true;
+                if record.idx > x_max {
+                    x_max = record.idx;
+                }
+                if record.time_ms > y_max {
+                    y_max = record.time_ms;
+                }
+                if record.idx < x_min {
+                    x_min = record.idx;
+                }
+                if record.time_ms < y_min {
+                    y_min = record.time_ms;
+                }
+
+                data.push(record.as_tuple());
+                Ok::<(), failure::Error>(())
+            })
+            .or_else(|e| {
+                if !first_valid_record {
+                    println!("Found header {:?}", rec);
+                    let columns = header::parse_header_columns(rec.as_slice());
+                    println!("Found header columns {:?}", columns);
+                    let info = header::parse_header_info(rec.as_slice());
+                    println!("Found header info {:?}", info);
+                    Ok::<(), failure::Error>(())
+                } else {
+                    Err(e)
+                }
+            })
+            .unwrap_or_else(|e| {
+                warn!("Failed to convert {:?}", e);
+                ()
+            });
     }
 
     if data.len() < 2 {
@@ -148,10 +172,22 @@ fn run() -> Result<()> {
     let y_min: f32 = y_min as f32;
     let x_min: f32 = x_min as f32;
 
-    plot(&file, &label, &title, &data, (x_min..x_max,y_min..y_max))?;
+    plot(&file, &label, &title, &data, (x_min..x_max, y_min..y_max))?;
 
     Ok(())
 }
 
-
 quick_main!(run);
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn full_check() {
+        const X: &'static str = r#"
+Pallet: "pallet-utility", Extrinsic: "as_sub", Steps: 30, Repeat: 11
+A,I,time
+77,0,2"#;
+    }
+}
